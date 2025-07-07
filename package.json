@@ -1,0 +1,23 @@
+{
+  "name": "plonkphil",
+  "version": "1.0.0",
+  "description": "PLONK setup for bgTrait.circom",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "compile:circuit": "circom circuits/bgTrait.circom --r1cs --wasm --sym -l node_modules/circomlib/circuits",
+    "setup:ptau": "snarkjs powersOfTau new bn128 12 ptau/pot12_0000.ptau && snarkjs powersOfTau contribute ptau/pot12_0000.ptau ptau/pot12_0000.ptau --name=\"first contribution\" && snarkjs powersOfTau prepare phase2 ptau/pot12_0000.ptau ptau/pot12_final.ptau",
+    "setup:zkey": "snarkjs plonk setup circuits/bgTrait.r1cs ptau/pot12_final.ptau bgTrait.zkey && snarkjs zkey export verificationkey bgTrait.zkey verification_key.json",
+    "prove": "node circuits/bgTrait_js/generate_witness.js circuits/bgTrait_js/bgTrait.wasm input.json witness.wtns && snarkjs plonk prove bgTrait.zkey witness.wtns proof.json public.json",
+    "verify": "snarkjs plonk verify verification_key.json public.json proof.json"
+  },
+  "dependencies": {
+    "axios": "^1.10.0",
+    "circomlib": "^2.0.5"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^6.0.0",
+    "hardhat": "^2.25.0",
+    "snarkjs": "^0.7.5"
+  }
+}
