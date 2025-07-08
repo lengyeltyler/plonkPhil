@@ -8,21 +8,20 @@ import "hardhat/console.sol";
 import "./Verifier.sol";
 
 contract RiscVzkVM is ERC721URIStorage {
-    uint256 private _tokenIdCounter;
     Verifier public verifier;
+    uint256 private _tokenIdCounter;
 
     int16[15] private cosTable = [
-        int16(10000), int16(9063), int16(7071), int16(4226), int16(0),
-        int16(-4226), int16(-7071), int16(-9063), int16(-10000), int16(-9063),
-        int16(-7071), int16(-4226), int16(0), int16(4226), int16(7071)
+        int16(10000),  int16(9063),  int16(7071),  int16(4226),  int16(0),
+        int16(-4226),  int16(-7071), int16(-9063), int16(-10000),int16(-9063),
+        int16(-7071),  int16(-4226), int16(0),     int16(4226),  int16(7071)
     ];
     int16[15] private sinTable = [
         int16(0),     int16(4226),  int16(7071),  int16(9063),   int16(10000),
         int16(9063),  int16(7071),  int16(4226),  int16(0),      int16(-4226),
-        int16(-7071), int16(-9063), int16(-10000), int16(-9063), int16(-7071)
+        int16(-7071), int16(-9063), int16(-10000),int16(-9063),  int16(-7071)
     ];
 
-    // ========== UPDATED HEADER WITH viewBox & xmlns:xlink ==========
     string constant HEADER =
         "<svg width='420' height='420' viewBox='0 0 420 420' "
         "xmlns='http://www.w3.org/2000/svg' xmlns:xlink='http://www.w3.org/1999/xlink'>"
@@ -36,12 +35,10 @@ contract RiscVzkVM is ERC721URIStorage {
         "</defs>"
         "<path d='M0,0h420v420h-420Z' fill='black'/>";
 
-    string constant FOOTER = "</svg>";
-
-    // ========== UPDATED USE_PREF TO xlink:href ==========
-    string constant USE_PREF = "<use xlink:href='#c' x='";
-    string constant USE_MID  = "' y='";
-    string constant USE_SUFF = "' fill='url(#sunG)' fill-opacity='0.8'/>";
+    string constant FOOTER    = "</svg>";
+    string constant USE_PREF  = "<use xlink:href='#c' x='";
+    string constant USE_MID   = "' y='";
+    string constant USE_SUFF  = "' fill='url(#sunG)' fill-opacity='0.8'/>";
 
     event Minted(uint256 indexed tokenId, address indexed owner, string tokenURI);
 
@@ -50,26 +47,45 @@ contract RiscVzkVM is ERC721URIStorage {
         verifier = Verifier(verifierAddress);
     }
 
-    // Re-added tokenIdCounter view for off-chain scripts
+    /// @dev Decode bytes proof into uint256[24] memory for verifier
+    function _decodeProof(bytes calldata proof) internal pure returns (uint256[24] memory arr) {
+        require(proof.length == 24 * 32, "Proof must be 768 bytes");
+        for (uint256 i = 0; i < 24; ++i) {
+            uint256 word;
+            assembly {
+                word := calldataload(add(proof.offset, mul(i, 32)))
+            }
+            arr[i] = word;
+        }
+    }
+
     function tokenIdCounter() public view returns (uint256) {
         console.log("tokenIdCounter called, returning:", _tokenIdCounter);
         return _tokenIdCounter;
     }
 
+    /// @param proof The serialized PLONK proof bytes
+    /// @param pubSignals The 48 public signals from bgTrait.circom
     function mintNFT(
-        uint256[2] calldata a,
-        uint256[2][2] calldata b,
-        uint256[2] calldata c,
-        uint256[] calldata input
-    ) public {
-        require(input.length == 48, "Input must be length 48");
-        uint256[48] memory inputFixed;
-        for (uint256 i = 0; i < 48; ++i) inputFixed[i] = input[i];
-        require(verifier.verifyProof(a, b, c, inputFixed), "Invalid proof");
+        bytes calldata proof,
+        uint256[] calldata pubSignals
+    ) external {
+        require(pubSignals.length == 48, "Input must be length 48");
+        uint256[24] memory decodedProof = _decodeProof(proof);
+        // Convert pubSignals from dynamic array to fixed-size array
+        uint256[48] memory fixedPubSignals;
+        for (uint256 i = 0; i < 48; ++i) {
+            fixedPubSignals[i] = pubSignals[i];
+        }
+        require(
+            verifier.verifyProof(decodedProof, fixedPubSignals),
+            "Invalid proof"
+        );
 
         uint256 tokenId = _tokenIdCounter++;
-        string memory svgImage = generateSVG(input);
+        string memory svgImage = generateSVG(pubSignals);
         string memory base64Image = Base64.encode(bytes(svgImage));
+
         string memory json = string(
             abi.encodePacked(
                 '{"name":"Phil NFT #', Strings.toString(tokenId),
@@ -77,43 +93,52 @@ contract RiscVzkVM is ERC721URIStorage {
                 '"image":"data:image/svg+xml;base64,', base64Image, '"}'
             )
         );
+
         _safeMint(msg.sender, tokenId);
         _setTokenURI(tokenId, json);
         emit Minted(tokenId, msg.sender, json);
     }
 
-    function generateSVG(uint256[] calldata input) internal view returns (string memory) {
+    /// @dev Build the SVG string, using the length of pubSignals for the spiral
+    function generateSVG(
+        uint256[] calldata pubSignals
+    ) internal view returns (string memory) {
         bytes memory headerBytes = bytes(HEADER);
         bytes memory footerBytes = bytes(FOOTER);
-        uint256 dynamicLen = _calcDynamicLen(input);
+        uint256 dynamicLen = _calcDynamicLen(pubSignals);
         uint256 totalLen = headerBytes.length + dynamicLen + footerBytes.length;
+
         bytes memory buf = new bytes(totalLen);
         uint256 ptr = 0;
 
-        // copy header
+        // Copy header
         for (uint256 i = 0; i < headerBytes.length; ++i) {
             buf[ptr++] = headerBytes[i];
         }
 
-        // dynamic <use> entries
-        uint256 step = input.length - 1;
-        for (uint256 i = 0; i < input.length; ++i) {
+        // Draw spiral circles
+        uint256 step = pubSignals.length - 1;
+        for (uint256 i = 0; i < pubSignals.length; ++i) {
             uint256 rScaled = (210 * i) / step;
             int256 xOff = (cosTable[i % cosTable.length] * int256(rScaled)) / 10000;
             int256 yOff = (sinTable[i % sinTable.length] * int256(rScaled)) / 10000;
             int256 xCoord = int256(210) + xOff;
             int256 yCoord = int256(210) + yOff;
 
-            for (uint256 j = 0; j < bytes(USE_PREF).length; ++j) buf[ptr++] = bytes(USE_PREF)[j];
+            // <use x='…' y='…' …/>
+            bytes memory p = bytes(USE_PREF);
+            for (uint256 j = 0; j < p.length; ++j) buf[ptr++] = p[j];
             bytes memory xb = bytes(Strings.toString(uint256(xCoord < 0 ? 0 : uint256(xCoord))));
             for (uint256 j = 0; j < xb.length; ++j) buf[ptr++] = xb[j];
-            for (uint256 j = 0; j < bytes(USE_MID).length; ++j) buf[ptr++] = bytes(USE_MID)[j];
+            bytes memory m = bytes(USE_MID);
+            for (uint256 j = 0; j < m.length; ++j) buf[ptr++] = m[j];
             bytes memory yb = bytes(Strings.toString(uint256(yCoord < 0 ? 0 : uint256(yCoord))));
             for (uint256 j = 0; j < yb.length; ++j) buf[ptr++] = yb[j];
-            for (uint256 j = 0; j < bytes(USE_SUFF).length; ++j) buf[ptr++] = bytes(USE_SUFF)[j];
+            bytes memory s = bytes(USE_SUFF);
+            for (uint256 j = 0; j < s.length; ++j) buf[ptr++] = s[j];
         }
 
-        // copy footer
+        // Copy footer
         for (uint256 i = 0; i < footerBytes.length; ++i) {
             buf[ptr++] = footerBytes[i];
         }
@@ -121,14 +146,18 @@ contract RiscVzkVM is ERC721URIStorage {
         return string(buf);
     }
 
-    function _calcDynamicLen(uint256[] calldata input) internal view returns (uint256 dynamicLen) {
-        uint256 step = input.length - 1;
-        for (uint256 i = 0; i < input.length; ++i) {
+    /// @dev Precompute total length of all `<use>` elements
+    function _calcDynamicLen(
+        uint256[] calldata pubSignals
+    ) internal view returns (uint256 dynamicLen) {
+        uint256 step = pubSignals.length - 1;
+        for (uint256 i = 0; i < pubSignals.length; ++i) {
             uint256 rScaled = (210 * i) / step;
             int256 xOff = (cosTable[i % cosTable.length] * int256(rScaled)) / 10000;
             int256 yOff = (sinTable[i % sinTable.length] * int256(rScaled)) / 10000;
             int256 xCoord = int256(210) + xOff;
             int256 yCoord = int256(210) + yOff;
+
             dynamicLen += bytes(USE_PREF).length;
             dynamicLen += bytes(Strings.toString(uint256(xCoord < 0 ? 0 : uint256(xCoord)))).length;
             dynamicLen += bytes(USE_MID).length;

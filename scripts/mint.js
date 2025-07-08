@@ -1,131 +1,141 @@
+// scripts/mint.js
+
 const { ethers } = require("hardhat");
-const { groth16 } = require("snarkjs");
-const fs = require("fs");
-const axios = require("axios");
+const { plonk }  = require("snarkjs");
+const fs        = require("fs");
+const axios     = require("axios");
 
 async function getEthPrice() {
-    try {
-        const response = await axios.get(
-            "https://api.etherscan.io/api?module=stats&action=ethprice&apikey=MF1UH981PQBWJXHNWNQW6AAX3A3ERVGYGH"
-        );
-        return parseFloat(response.data.result.ethusd);
-    } catch (error) {
-        console.error("Failed to fetch ETH price:", error.message);
-        return 2000; // fallback
-    }
+  try {
+    const { data } = await axios.get(
+      "https://api.etherscan.io/api?module=stats&action=ethprice&apikey=MF1UH981PQBWJXHNWNQW6AAX3A3ERVGYGH"
+    );
+    return parseFloat(data.result.ethusd);
+  } catch (e) {
+    console.warn("ETH price fetch failed:", e.message);
+    return 2000;
+  }
 }
 
 async function getGasPrice() {
-    try {
-        const response = await axios.get(
-            "https://api.etherscan.io/api?module=gastracker&action=gasoracle&apikey=MF1UH981PQBWJXHNWNQW6AAX3A3ERVGYGH"
-        );
-        return parseFloat(response.data.result.ProposeGasPrice) * 1e9; // Gwei → Wei
-    } catch (error) {
-        console.error("Failed to fetch gas price:", error.message);
-        return 20e9; // fallback
-    }
-}
-
-function parseCalldata(calldata) {
-    const argv = calldata
-        .replace(/["[\]\s]/g, "")
-        .split(',')
-        .map(x => BigInt(x));
-
-    const a = [argv[0], argv[1]];
-    const b = [
-        [argv[2], argv[3]],
-        [argv[4], argv[5]]
-    ];
-    const c = [argv[6], argv[7]];
-    const signals = argv.slice(8);
-    return [a, b, c, signals];
+  try {
+    const { data } = await axios.get(
+      "https://api.etherscan.io/api?module=gastracker&action=gasoracle&apikey=MF1UH981PQBWJXHNWNQW6AAX3A3ERVGYGH"
+    );
+    return Math.floor(parseFloat(data.result.ProposeGasPrice) * 1e9);
+  } catch (e) {
+    console.warn("Gas price fetch failed:", e.message);
+    return 20e9;
+  }
 }
 
 async function main() {
-    // ─── UPDATE THIS to your new RiscVzkVM address ───
-    const contractAddress = "0xB581C9264f59BF0289fA76D61B2D0746dCE3C30D";
-    const nftContract = await ethers.getContractAt("RiscVzkVM", contractAddress);
+  // ←– update this to your deployed RiscVzkVM address
+  const CONTRACT = "0x610178dA211FEF7D417bC0e6FeD39F05609AD788";
+  const nft      = await ethers.getContractAt("RiscVzkVM", CONTRACT);
 
-    const input = {
-        tokenId: 10,
-        seed: 20
-    };
+  const input = { tokenId: 10, seed: 20 };
 
-    const { proof, publicSignals } = await groth16.fullProve(
-        input,
-        "circuits/bgTrait_js/bgTrait.wasm",
-        "circuits/zkeys/bgTrait_0001.zkey"
-    );
+  console.log("⏳ Generating PLONK proof…");
+  const { proof, publicSignals } = await plonk.fullProve(
+    input,
+    "circuits/bgTrait_js/bgTrait.wasm",
+    "circuits/bgTrait.zkey"
+  );
+  console.log("✅ Proof & public signals ready");
 
-    console.log("Public Signals:", publicSignals);
+  const fullCalldata = await plonk.exportSolidityCallData(proof, publicSignals);
 
-    const calldata = await groth16.exportSolidityCallData(proof, publicSignals);
-    const [a, b, c, signalsBigInt] = parseCalldata(calldata);
+  let proofJson, signalsJson;
+  if (fullCalldata.includes("][")) {
+    const [first, second] = fullCalldata.split("][");
+    proofJson   = first + "]";
+    signalsJson = "[" + second;
+  } else {
+    const idx       = fullCalldata.indexOf(",");
+    proofJson       = fullCalldata.slice(0, idx);
+    signalsJson     = fullCalldata.slice(idx + 1);
+  }
 
+  // build the proof bytes
+  let proofBytes;
+  try {
+    const proofArr = JSON.parse(proofJson);
+    proofBytes = "0x" + proofArr.map(h => h.slice(2)).join("");
+  } catch (e) {
+    console.error("Bad JSON for proof:", proofJson);
+    throw e;
+  }
+
+  // parse the public signals array
+  let signalsArr;
+  try {
+    signalsArr = JSON.parse(signalsJson);
+  } catch (e) {
+    console.error("Bad JSON for signals:", signalsJson);
+    throw e;
+  }
+
+  console.log("Proof bytes length:", proofBytes.length);
+  console.log("Signals count:", signalsArr.length);
+
+  // ─── Estimate gas & cost ─────────────────────────────
+  const gasPriceNum = await getGasPrice();
+  const ethPrice    = await getEthPrice();
+  const gasEst      = await nft.mintNFT.estimateGas(proofBytes, signalsArr);
+  console.log("Estimated gas:", gasEst.toString());
+
+  const estCostWei = BigInt(gasEst) * BigInt(gasPriceNum);
+  const estCostEth = ethers.formatEther(estCostWei);
+  console.log(
+    `Est. cost: ${estCostEth} ETH (~$${(parseFloat(estCostEth) * ethPrice).toFixed(2)} USD)`
+  );
+
+  // ─── Actually mint ────────────────────────────────────
+  const tx = await nft.mintNFT(proofBytes, signalsArr, { gasLimit: 15_000_000 });
+  console.log("✅ Mint tx hash:", tx.hash);
+  const receipt = await tx.wait();
+
+  // ─── Actual cost ──────────────────────────────────────
+  const actualCostWei = BigInt(receipt.gasUsed) * BigInt(gasPriceNum);
+  const actualCostEth = ethers.formatEther(actualCostWei);
+  console.log(
+    `Actual gasUsed: ${receipt.gasUsed.toString()}, cost: ${actualCostEth} ETH (~$${(parseFloat(actualCostEth) * ethPrice).toFixed(2)} USD)`
+  );
+
+  // ─── Handle Minted event ──────────────────────────────
+  for (const log of receipt.logs) {
     try {
-        const gasEstimate = await nftContract.mintNFT.estimateGas(a, b, c, signalsBigInt);
-        console.log("Estimated gas:", gasEstimate.toString());
+      const parsed = nft.interface.parseLog(log);
+      if (parsed.name === "Minted") {
+        console.log("🎉 Minted Event:", {
+          tokenId: parsed.args.tokenId.toString(),
+          owner:   parsed.args.owner,
+        });
+        fs.writeFileSync("minted_tokenURI.txt", parsed.args.tokenURI);
+      }
+    } catch {}
+  }
 
-        const gasPrice = await getGasPrice();
-        const ethPrice = await getEthPrice();
+  // ─── Inspect on-chain state ───────────────────────────
+  const latest = await nft.tokenIdCounter(); // returns native BigInt
+  const last   = latest - 1n;
+  console.log("Latest tokenId:", latest.toString());
+  console.log("Owner of", last.toString(), ":", await nft.ownerOf(last));
 
-        const gasEstimateBigInt = BigInt(gasEstimate.toString());
-        const gasCostEth = ethers.formatEther(gasEstimateBigInt * BigInt(Math.floor(gasPrice)));
-        const gasCostUsd = parseFloat(gasCostEth) * ethPrice;
-        console.log(`Gas cost: ${gasCostEth} ETH (~$${gasCostUsd.toFixed(2)} USD)`);
+  const tokenURI = await nft.tokenURI(last);
+  console.log("Raw tokenURI:", tokenURI);
 
-        const tx = await nftContract.mintNFT(a, b, c, signalsBigInt, { gasLimit: 15_000_000 });
-        const receipt = await tx.wait();
-        console.log("NFT minted! Transaction hash:", receipt.hash);
-
-        const gasUsedBigInt = BigInt(receipt.gasUsed.toString());
-        const actualGasCostEth = ethers.formatEther(gasUsedBigInt * BigInt(Math.floor(gasPrice)));
-        const actualGasCostUsd = parseFloat(actualGasCostEth) * ethPrice;
-        console.log(`Actual gas used: ${receipt.gasUsed}, Cost: ${actualGasCostEth} ETH (~$${actualGasCostUsd.toFixed(2)} USD)`);
-
-        for (const log of receipt.logs) {
-            try {
-                const parsedLog = nftContract.interface.parseLog(log);
-                if (parsedLog && parsedLog.name === "Minted") {
-                    console.log("Minted Event:", {
-                        tokenId: parsedLog.args.tokenId.toString(),
-                        owner: parsedLog.args.owner,
-                        tokenURI: parsedLog.args.tokenURI
-                    });
-                    fs.writeFileSync("minted_tokenURI.txt", parsedLog.args.tokenURI);
-                    console.log("Minted tokenURI saved to minted_tokenURI.txt");
-                }
-            } catch (_) {}
-        }
-
-        const latestTokenId = await nftContract.tokenIdCounter();
-        console.log("Latest tokenId:", latestTokenId.toString());
-
-        const tokenIdToCheck = latestTokenId - 1n;
-        const owner = await nftContract.ownerOf(Number(tokenIdToCheck));
-        console.log("Owner of token ID", tokenIdToCheck.toString(), ":", owner);
-
-const tokenURI = await nftContract.tokenURI(Number(tokenIdToCheck));
-        console.log("Token URI:", tokenURI);
-
-        // ← Fix: parse the JSON string, then pull out the image data URI
-        const metadata = JSON.parse(tokenURI);
-        const dataUri = metadata.image;                              // "data:image/svg+xml;base64,PHN2Zy…"
-        const svgBase64 = dataUri.split(",")[1];                     // everything after the comma
-        const svg = Buffer.from(svgBase64, "base64").toString();    // now a valid SVG string
-        console.log("SVG:", svg);
-        fs.writeFileSync("onchain_svg.svg", svg);
-        console.log("On-chain SVG saved to onchain_svg.svg");
-
-    } catch (error) {
-        console.error("Error in mintNFT:", error);
-        if (error.reason) console.log("Revert reason:", error.reason);
-    }
+  // ─── Decode the SVG ────────────────────────────────────
+  const meta    = JSON.parse(tokenURI);
+  const dataUri = meta.image;
+  const svgBase = dataUri.split(",")[1];
+  const svg     = Buffer.from(svgBase, "base64").toString();
+  fs.writeFileSync("onchain_svg.svg", svg);
+  console.log("✅ onchain_svg.svg written");
 }
 
-main().catch((err) => {
-    console.error("Main error:", err);
-    process.exit(1);
+main().catch((e) => {
+  console.error("ERROR in mint.js:", e);
+  process.exit(1);
 });

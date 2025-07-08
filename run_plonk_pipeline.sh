@@ -1,49 +1,58 @@
 #!/usr/bin/env bash
 set -euo pipefail
+set -x   # show each command as it runs
 
-# 0) MAKE SURE YOU'RE ON CIRCOM v2.2.2 and SNARKJS v0.7.5:
-#    circom --version      # should print "circom compiler 2.2.2" :contentReference[oaicite:0]{index=0}
-#    snarkjs --version    # should print "0.7.5"             :contentReference[oaicite:1]{index=1}
-
-# 1) Compile the circuit (all outputs into `circuits/`)
+# 1) Compile the circuit
+echo "=== Compile circuit ==="
 circom circuits/bgTrait.circom \
   --r1cs --wasm --sym \
   --output circuits \
-  -l node_modules/circomlib/circuits          # circomlib v2.0.5 :contentReference[oaicite:2]{index=2}
+  -l node_modules/circomlib/circuits
 
-# 2) Run the PLONK setup (universal Ptau already in ptau/pot13_final.ptau)
-snarkjs plonk setup \
+# 2) Inspect R1CS
+echo "=== R1CS info ==="
+npx snarkjs r1cs info circuits/bgTrait.r1cs
+
+# 3) PLONK setup
+echo "=== PLONK setup ==="
+npx snarkjs plonk setup \
   circuits/bgTrait.r1cs \
   ptau/pot13_final.ptau \
   circuits/bgTrait.zkey
 
-# 3) Export the on-chain verifier key
-snarkjs zkey export verificationkey \
+# 4) Export verification key
+echo "=== Export VK ==="
+npx snarkjs zkey export verificationkey \
   circuits/bgTrait.zkey \
   circuits/verification_key.json
 
-# 4) Generate the witness
-node circuits/bgTrait_js/generate_witness.js \
-  circuits/bgTrait_js/bgTrait.wasm \
+# 5) Fullprove (witness + proof + public)
+echo "=== PLONK fullprove ==="
+npx snarkjs plonk fullprove \
   input.json \
-  circuits/witness.wtns
-
-# 5) Create the proof
-snarkjs plonk prove \
+  circuits/bgTrait_js/bgTrait.wasm \
   circuits/bgTrait.zkey \
-  circuits/witness.wtns \
   circuits/proof.json \
   circuits/public.json
 
-# 6) Reorder & cast public signals (inputs first, then outputs; strings → numbers)
-jq -c '(.[-2:] + .[0:-2]) | map(tonumber)' \
-  circuits/public.json \
-  > circuits/public_ready.json
+# Debug: show how many public signals we got
+echo "public.json length = $(jq length circuits/public.json)"
 
-# 7) Final verification
-snarkjs plonk verify \
+# 6) Verify proof structurally & logically
+echo "=== PLONK verify ==="
+npx snarkjs plonk verify \
   circuits/verification_key.json \
-  circuits/public_ready.json \
-  circuits/proof.json
+  circuits/public.json \
+  circuits/proof.json \
+  --verbose
 
-echo "✅ All PLONK steps completed successfully!"
+# If the above succeeds, you’ll see “OK!” here.
+echo "✅ Local PLONK verification passed."
+
+# 7) Reorder for on-chain calldata
+echo "=== Reorder public signals for Solidity ==="
+jq -c '(.[-2:] + .[0:-2]) | map(tonumber)' \
+  circuits/public.json > circuits/public_ready.json
+
+echo "public_ready.json length = $(jq length circuits/public_ready.json)"
+echo "✅ Pipeline completed. Ready to call your on-chain verifier with public_ready.json + proof.json"

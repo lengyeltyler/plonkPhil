@@ -12,12 +12,13 @@
     "verify": "snarkjs plonk verify verification_key.json public.json proof.json"
   },
   "dependencies": {
+    "@openzeppelin/contracts": "^5.3.0",
     "axios": "^1.10.0",
     "circomlib": "^2.0.5"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^6.0.0",
     "hardhat": "^2.25.0",
-    "snarkjs": "^0.7.5"
+    "snarkjs": "github:iden3/snarkjs"
   }
 }
