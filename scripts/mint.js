@@ -25,13 +25,12 @@ async function getGasPrice() {
     return Math.floor(parseFloat(data.result.ProposeGasPrice) * 1e9);
   } catch (e) {
     console.warn("Gas price fetch failed:", e.message);
-    return 20e9;
+    return BigInt(20e9);
   }
 }
 
 async function main() {
-  // ←– update this to your deployed RiscVzkVM address
-  const CONTRACT = "0x610178dA211FEF7D417bC0e6FeD39F05609AD788";
+  const CONTRACT = "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512";
   const nft      = await ethers.getContractAt("RiscVzkVM", CONTRACT);
 
   const input = { tokenId: 10, seed: 20 };
@@ -43,50 +42,41 @@ async function main() {
     "circuits/bgTrait.zkey"
   );
   console.log("✅ Proof & public signals ready");
+  console.log("→ publicSignals.length:", publicSignals.length);
 
+  // —— DEBUG: inspect the raw spiral outputs —— 
+  const rawXs = publicSignals.slice(5, 5 + 32).map(n => parseInt(n));
+  const rawYs = publicSignals.slice(37, 37 + 32).map(n => parseInt(n));
+  console.log("🔍 raw circleX inputs:", rawXs);
+  console.log("🔍 raw circleY inputs:", rawYs);
+  // **********************************************
+
+  // build calldata for Solidity
   const fullCalldata = await plonk.exportSolidityCallData(proof, publicSignals);
-
   let proofJson, signalsJson;
   if (fullCalldata.includes("][")) {
-    const [first, second] = fullCalldata.split("][");
-    proofJson   = first + "]";
-    signalsJson = "[" + second;
+    [proofJson, signalsJson] = fullCalldata.split("][");
+    proofJson   += "]";
+    signalsJson  = "[" + signalsJson;
   } else {
-    const idx       = fullCalldata.indexOf(",");
-    proofJson       = fullCalldata.slice(0, idx);
-    signalsJson     = fullCalldata.slice(idx + 1);
+    const idx = fullCalldata.indexOf(",");
+    proofJson   = fullCalldata.slice(0, idx);
+    signalsJson = fullCalldata.slice(idx + 1);
   }
 
-  // build the proof bytes
-  let proofBytes;
-  try {
-    const proofArr = JSON.parse(proofJson);
-    proofBytes = "0x" + proofArr.map(h => h.slice(2)).join("");
-  } catch (e) {
-    console.error("Bad JSON for proof:", proofJson);
-    throw e;
-  }
-
-  // parse the public signals array
-  let signalsArr;
-  try {
-    signalsArr = JSON.parse(signalsJson);
-  } catch (e) {
-    console.error("Bad JSON for signals:", signalsJson);
-    throw e;
-  }
-
-  console.log("Proof bytes length:", proofBytes.length);
-  console.log("Signals count:", signalsArr.length);
+  const proofArr   = JSON.parse(proofJson);
+  const proofBytes = "0x" + proofArr.map(h => h.slice(2)).join("");
+  const signalsArr = JSON.parse(signalsJson);
 
   // ─── Estimate gas & cost ─────────────────────────────
   const gasPriceNum = await getGasPrice();
   const ethPrice    = await getEthPrice();
+  // estimateGas returns a BigInt
   const gasEst      = await nft.mintNFT.estimateGas(proofBytes, signalsArr);
   console.log("Estimated gas:", gasEst.toString());
 
-  const estCostWei = BigInt(gasEst) * BigInt(gasPriceNum);
-  const estCostEth = ethers.formatEther(estCostWei);
+  const estCostWei  = gasEst * BigInt(gasPriceNum);
+  const estCostEth  = ethers.formatEther(estCostWei);
   console.log(
     `Est. cost: ${estCostEth} ETH (~$${(parseFloat(estCostEth) * ethPrice).toFixed(2)} USD)`
   );
@@ -97,7 +87,7 @@ async function main() {
   const receipt = await tx.wait();
 
   // ─── Actual cost ──────────────────────────────────────
-  const actualCostWei = BigInt(receipt.gasUsed) * BigInt(gasPriceNum);
+  const actualCostWei = receipt.gasUsed * BigInt(gasPriceNum);
   const actualCostEth = ethers.formatEther(actualCostWei);
   console.log(
     `Actual gasUsed: ${receipt.gasUsed.toString()}, cost: ${actualCostEth} ETH (~$${(parseFloat(actualCostEth) * ethPrice).toFixed(2)} USD)`
@@ -117,8 +107,8 @@ async function main() {
     } catch {}
   }
 
-  // ─── Inspect on-chain state ───────────────────────────
-  const latest = await nft.tokenIdCounter(); // returns native BigInt
+  // ─── Decode the SVG ──────────────────────────────────
+  const latest = await nft.tokenIdCounter();
   const last   = latest - 1n;
   console.log("Latest tokenId:", latest.toString());
   console.log("Owner of", last.toString(), ":", await nft.ownerOf(last));
@@ -126,7 +116,6 @@ async function main() {
   const tokenURI = await nft.tokenURI(last);
   console.log("Raw tokenURI:", tokenURI);
 
-  // ─── Decode the SVG ────────────────────────────────────
   const meta    = JSON.parse(tokenURI);
   const dataUri = meta.image;
   const svgBase = dataUri.split(",")[1];
