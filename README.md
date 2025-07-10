@@ -1,7 +1,7 @@
-#plonkPhil
-#This repository demonstrates the use of zk-SNARKs with Circom and SnarkJS for generating on-chain NFTs on Ethereum. The process involves a Powers of Tau ceremony, circuit compilation, proof generation, and deployment via Hardhat.
+plonkPhil
+This repository demonstrates the use of zk-SNARKs with Circom and SnarkJS for generating on-chain NFTs on Ethereum. The process involves a Powers of Tau ceremony, circuit compilation, proof generation, and deployment via Hardhat.
 
-#Powers of Tau Ceremony
+Powers of Tau Ceremony
 Initialize and contribute to the Powers of Tau setup for the trusted ceremony:
 
 bash
